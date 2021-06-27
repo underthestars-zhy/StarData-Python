@@ -34,7 +34,6 @@ class BaseData:
 
 
 def get_all_items(model) -> list:
-    items = []
     res = []
     try:
         response = requests.get(
