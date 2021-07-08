@@ -92,6 +92,8 @@ class BaseModel:
     table_name: str
     primary_name: str
     value: Dict[str, StarParameter] = {}
+    update_lock = threading.Lock()
+    creat_on_remote = False
 
     def __init__(self, context: Context, creat: bool = True):
         self.context = context
@@ -117,9 +119,11 @@ class BaseModel:
 
     def set_value_with_dict(self, data: dict):
         for p_name in self.value:
+            self.update_lock.acquire()
             self.value[p_name].value = data[p_name.upper()]
+            self.update_lock.release()
 
-    def requests_value(self, name: str) -> Optional[StarValue]:
+    def requests_value(self, name: str):
         try:
             response = requests.get(
                 url=f"{self.context.base.url}/easy_get",
@@ -134,12 +138,22 @@ class BaseModel:
             self.status_code = response.status_code
             json_data = response.json()
             if json_data['type'] == 'get':
-                return StarValue(self.value[name].value_type, json_data['value'])
+                return json_data['value']
         except requests.exceptions.RequestException:
             return None
 
-    def background_get_value(self, name: str):
-        pass
+    def background_get_value(self, name):
+        res = self.requests_value(name)
+
+        if res is None:
+            if not self.value[name].not_null:
+                self.update_lock.acquire()
+                self.value[name].value = None
+                self.update_lock.release()
+        else:
+            self.update_lock.acquire()
+            self.value[name].value = res
+            self.update_lock.release()
 
     def get_value(self, name: str) -> StarValue:
         name = name.upper()
@@ -148,14 +162,21 @@ class BaseModel:
             res = self.requests_value(name)
 
             if not res:
+                self.update_lock.acquire()
+                self.value[name].value = res
+                self.update_lock.release()
                 return res
 
             if self.value[name].not_null:
                 raise StarGetValueError("We cannot communicate with StarData to obtain data, and your requested " +
                                         "value is not Null")
             else:
+                self.update_lock.acquire()
+                self.value[name].value = None
+                self.update_lock.release()
                 return StarValue(self.value[name].value_type, None)
         else:
-            requests_thread = threading.Thread(target=self.background_get_value, args=name)
-            requests_thread.start()
+            if self.creat_on_remote:
+                requests_thread = threading.Thread(target=self.background_get_value, args=[name])
+                requests_thread.start()
             return StarValue(self.value[name].value_type, self.value[name].value)
