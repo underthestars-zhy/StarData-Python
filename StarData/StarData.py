@@ -1,8 +1,9 @@
-from typing import Callable, List, TypeVar, Dict
+from typing import Callable, List, TypeVar, Dict, Optional
 import requests
-from .StarValue import *
 from .Error import *
 import threading
+import uuid
+import json
 
 M = TypeVar("M")
 
@@ -37,7 +38,7 @@ class Context:
         self.db_name = db_name
         self.get_value_mode = 0  # 0: Get back first, 1: Get first and then return, 2: Get once (Manual, loud)
         self.update_value_mode = 0  # 0: Automatic update (background) 1: Automatic update 2: Manual (save)
-        self.creat_mode = 0  # 0: Automatic creat 1: Manual (save)
+        self.creat_mode = 0.1  # 0: Automatic creat(.1 Background, .2: Front) 1: Manual (save .1 Background, .2: Front)
 
         try:
             response = requests.get(
@@ -88,12 +89,42 @@ class StarParameter:
         self.value_type = value_type
 
 
+class StarValue:
+    def __init__(self, value_type: str, value, base: Base):
+        self.value_type = value_type
+        self.value = value
+        self.base = base
+
+    def return_helper(self, value_type: str, value):
+        if self.value_type == value_type:
+            return value
+        else:
+            raise StarTypeError(f"The type you should choose is {self.value_type}")
+
+    def uuid(self) -> Optional[uuid.UUID]:
+        if self.value is None:
+            return None
+        return self.return_helper('uuid', uuid.UUID("{" + str(self.value) + "}"))
+
+    def str(self) -> Optional[str]:
+        if self.value is None:
+            return None
+        return self.return_helper('str', str(self.value))
+
+
+class StarEmpty:
+    pass
+
+
 class BaseModel:
     table_name: str
     primary_name: str
     value: Dict[str, StarParameter] = {}
     update_lock = threading.Lock()
+    creat_lock = threading.Lock()
+    creating_lock = threading.Lock()
     creat_on_remote = False
+    creating = False
 
     def __init__(self, context: Context, creat: bool = True):
         self.context = context
@@ -115,7 +146,25 @@ class BaseModel:
                                 self.value[str(p['parameter_name']).upper()].value = uuid.uuid1()
 
         if creat:
-            pass
+            creat_thread = threading.Thread(target=self.try_creat)
+            creat_thread.start()
+
+    def try_creat(self):
+        if self.creating or self.creat_on_remote:
+            return
+        self.creating_lock.acquire()
+        self.creating = True
+        self.creating_lock.release()
+
+        # TODO: Creat on Remote
+
+        self.creat_lock.acquire()
+        self.creat_on_remote = True
+        self.creat_lock.release()
+
+        self.creating_lock.acquire()
+        self.creating = False
+        self.creating_lock.release()
 
     def set_value_with_dict(self, data: dict):
         for p_name in self.value:
@@ -174,9 +223,14 @@ class BaseModel:
                 self.update_lock.acquire()
                 self.value[name].value = None
                 self.update_lock.release()
-                return StarValue(self.value[name].value_type, None)
+                return StarValue(self.value[name].value_type, None, self.context.base)
         else:
             if self.creat_on_remote:
                 requests_thread = threading.Thread(target=self.background_get_value, args=[name])
                 requests_thread.start()
-            return StarValue(self.value[name].value_type, self.value[name].value)
+            return StarValue(self.value[name].value_type, self.value[name].value, self.context.base)
+
+    def set_value(self, name: str, value):
+        if not self.creat_on_remote:
+            creat_thread = threading.Thread(target=self.try_creat)
+            creat_thread.start()
