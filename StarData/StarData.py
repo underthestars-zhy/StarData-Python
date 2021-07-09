@@ -4,6 +4,7 @@ from .Error import *
 import threading
 import uuid
 import json
+from hashlib import md5
 
 M = TypeVar("M")
 
@@ -30,6 +31,11 @@ class Base:
             # TODO: Use local config file
 
     local: Optional[str] = None
+
+    def to_md5(self):
+        md5_obj = md5()
+        md5_obj.update(self.private_key.encode() + self.salt().encode())
+        return md5_obj.hexdigest()
 
 
 class Context:
@@ -109,26 +115,52 @@ class StarValue:
     def str(self) -> Optional[str]:
         if self.value is None:
             return None
-        return self.return_helper('str', str(self.value))
+        return self.return_helper('string', str(self.value))
 
 
 class StarEmpty:
     pass
 
 
+def transfer_to_json_value(value):
+    if isinstance(value, uuid.UUID):
+        return str(value)
+    else:
+        return value
+
+
+def transfer_from_json_value(config: dict, name: str, value):
+    p_type = 'parameter_type'
+
+    for p in config:
+        if p["parameter_name"].upper() == name.upper():
+            if p[p_type].lower() == 'uuid':
+                return uuid.UUID("{" + str(value) + '}')
+            elif p[p_type].lower() == 'string':
+                return str(value)
+            elif p[p_type].lower() == 'int':
+                return int(value)
+            elif p[p_type].lower() == 'double':
+                return float(value)
+            elif p[p_type].lower() == 'en_str':
+                return str(value)
+            else:
+                return value
+
+
 class BaseModel:
     table_name: str
     primary_name: str
-    value: Dict[str, StarParameter] = {}
-    update_lock = threading.Lock()
-    creat_lock = threading.Lock()
-    creating_lock = threading.Lock()
-    creat_on_remote = False
-    creating = False
 
     def __init__(self, context: Context, creat: bool = True):
         self.context = context
         self.status_code = -1
+        self.value: Dict[str, StarParameter] = {}
+        self.update_lock = threading.Lock()
+        self.creat_lock = threading.Lock()
+        self.creating_lock = threading.Lock()
+        self.creat_on_remote = False
+        self.creating = False
 
         # Init Value dict
         for db in self.context.base.config['db']:
@@ -148,6 +180,8 @@ class BaseModel:
         if creat:
             creat_thread = threading.Thread(target=self.try_creat)
             creat_thread.start()
+        else:
+            self.creat_on_remote = True
 
     def try_creat(self):
         if self.creating or self.creat_on_remote:
@@ -156,11 +190,27 @@ class BaseModel:
         self.creating = True
         self.creating_lock.release()
 
-        # TODO: Creat on Remote
+        json_data = self.to_json()
 
-        self.creat_lock.acquire()
-        self.creat_on_remote = True
-        self.creat_lock.release()
+        if json_data:
+            try:
+                response = requests.post(
+                    url=f"{self.context.base.url}/insert",
+                    params={
+                        "api": self.context.base.api,
+                    },
+                    headers={
+                        "Content-Type": "application/json; charset=utf-8",
+                    },
+                    data=json.dumps(json_data)
+                )
+
+                if response.json()['type'] == 'success':
+                    self.creat_lock.acquire()
+                    self.creat_on_remote = True
+                    self.creat_lock.release()
+            except requests.exceptions.RequestException:
+                pass
 
         self.creating_lock.acquire()
         self.creating = False
@@ -169,8 +219,30 @@ class BaseModel:
     def set_value_with_dict(self, data: dict):
         for p_name in self.value:
             self.update_lock.acquire()
-            self.value[p_name].value = data[p_name.upper()]
+            self.value[p_name.upper()].value = data[p_name.upper()]
             self.update_lock.release()
+
+    def to_json(self) -> Optional[dict]:
+        res = {
+                "table_name": self.table_name,
+                "db_name": self.context.db_name,
+                "key": self.context.base.to_md5(),
+                "insert_data": {}
+            }
+
+        insert_data = {}
+        for p_name in self.value:
+            # Is not null but value is none
+            if self.value[p_name.upper()].not_null and \
+                    (self.value[p_name.upper()].value is None or
+                     isinstance(self.value[p_name.upper()].value, StarEmpty)):
+                return None
+
+            insert_data[p_name.upper()] = transfer_to_json_value(self.value[p_name.upper()].value)
+
+        res['insert_data'] = insert_data
+
+        return res
 
     def requests_value(self, name: str):
         try:
@@ -197,38 +269,37 @@ class BaseModel:
         if res is None:
             if not self.value[name].not_null:
                 self.update_lock.acquire()
-                self.value[name].value = None
+                self.value[name.upper()].value = None
                 self.update_lock.release()
         else:
             self.update_lock.acquire()
-            self.value[name].value = res
+            self.value[name.upper()].value = res
             self.update_lock.release()
 
     def get_value(self, name: str) -> StarValue:
-        name = name.upper()
-        if isinstance(self.value[name].value, StarEmpty):
+        if isinstance(self.value[name.upper()].value, StarEmpty):
             # Get Value
             res = self.requests_value(name)
 
             if not res:
                 self.update_lock.acquire()
-                self.value[name].value = res
+                self.value[name.upper()].value = res
                 self.update_lock.release()
                 return res
 
-            if self.value[name].not_null:
+            if self.value[name.upper()].not_null:
                 raise StarGetValueError("We cannot communicate with StarData to obtain data, and your requested " +
                                         "value is not Null")
             else:
                 self.update_lock.acquire()
-                self.value[name].value = None
+                self.value[name.upper()].value = None
                 self.update_lock.release()
-                return StarValue(self.value[name].value_type, None, self.context.base)
+                return StarValue(self.value[name.upper()].value_type, None, self.context.base)
         else:
             if self.creat_on_remote:
                 requests_thread = threading.Thread(target=self.background_get_value, args=[name])
                 requests_thread.start()
-            return StarValue(self.value[name].value_type, self.value[name].value, self.context.base)
+            return StarValue(self.value[name.upper()].value_type, self.value[name.upper()].value, self.context.base)
 
     def set_value(self, name: str, value):
         if not self.creat_on_remote:
