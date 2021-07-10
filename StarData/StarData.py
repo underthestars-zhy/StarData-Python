@@ -37,11 +37,25 @@ class Base:
         md5_obj.update(self.private_key.encode() + self.salt().encode())
         return md5_obj.hexdigest()
 
+    def get_p_config(self, table_name: str, db_name: str) -> dict:
+        for db in self.config['db']:
+            if db['db_name'].lower() == db_name.lower():
+                for table in db['db_table']:
+                    if table['table_name'].lower() == table_name.lower():
+                        return table['table_parameter']
+
+    def is_private(self,  db_name: str) -> bool:
+        for db in self.config['db']:
+            if db['db_name'].lower() == db_name.lower():
+                return not db['public']
+
 
 class Context:
-    def __init__(self, base: Base, db_name: str):
+    def __init__(self, base: Base, db_name: str, private: str = ''):
         self.base = base
         self.db_name = db_name
+        self.private = private
+        self.creat_on_remote = False
         self.get_value_mode = 0  # 0: Get back first, 1: Get first and then return, 2: Get once (Manual, loud)
         self.update_value_mode = 0  # 0: Automatic update (background) 1: Automatic update 2: Manual (save)
         self.creat_mode = 0.1  # 0: Automatic creat(.1 Background, .2: Front) 1: Manual (save .1 Background, .2: Front)
@@ -53,13 +67,28 @@ class Context:
                     "api": base.api,
                     "private_key": base.private_key,
                     "salt": base.salt(),
-                    "db_name": db_name,
+                    "db_name": db_name + private,
                 },
             )
             self.status_code = response.status_code
         except requests.exceptions.RequestException:
             self.status_code = -1
             raise VerificationError("There is an error in your API, key, salted string, and database name")
+
+        if private != '':  # is a private context
+            try:
+                response = requests.get(
+                    url=f"{self.base.url}/easy_is_creat",
+                    params={
+                        "api": self.base.api,
+                        "db_name": self.db_name,
+                        "context_id": private,
+                    },
+                )
+
+                self.creat_on_remote = response.json()['value']
+            except requests.exceptions.RequestException:
+                pass
 
     def fetch(self, model: M) -> List[M]:
         res = []
@@ -69,7 +98,7 @@ class Context:
                 url=f"{self.base.url}/easy_get_all",
                 params={
                     "api": self.base.api,
-                    "db_name": self.db_name,
+                    "db_name": self.db_name + self.private,
                     "table_name": model.table_name,
                 },
             )
@@ -85,6 +114,24 @@ class Context:
             raise FetchError(f"Unable to query data {model}")
 
         return res
+
+    def creat(self) -> str:
+        if self.base.is_private(self.db_name) and not self.creat_on_remote:
+            try:
+                response = requests.get(
+                    url=f"{self.base.url}/creat_db",
+                    params={
+                        "api": "ahdi1e3",
+                        "db_name": self.db_name,
+                    },
+                )
+
+                self.private = response.json()['context_id']
+                self.creat_on_remote = True
+                return self.private
+            except requests.exceptions.RequestException:
+                # TODO: Save in the local
+                return ""
 
 
 class StarParameter:
@@ -129,7 +176,7 @@ def transfer_to_json_value(value):
         return value
 
 
-def transfer_from_json_value(config: dict, name: str, value):
+def transfer_from_json_value(config: dict, name: str, value, base: Base):
     p_type = 'parameter_type'
 
     for p in config:
@@ -144,6 +191,12 @@ def transfer_from_json_value(config: dict, name: str, value):
                 return float(value)
             elif p[p_type].lower() == 'en_str':
                 return str(value)
+            elif p[p_type].lower() == 'context':
+                context_data = str(value).split('-')
+                if len(context_data) > 1:
+                    return Context(base=base, db_name=context_data[0], private=context_data[1])
+                else:
+                    return Context(base=base, db_name=context_data[0])
             else:
                 return value
 
@@ -219,13 +272,18 @@ class BaseModel:
     def set_value_with_dict(self, data: dict):
         for p_name in self.value:
             self.update_lock.acquire()
-            self.value[p_name.upper()].value = data[p_name.upper()]
+            self.value[p_name.upper()].value = transfer_from_json_value(
+                config=self.context.base.get_p_config(self.table_name, self.context.db_name),
+                name=p_name,
+                value=data[p_name.upper()],
+                base=self.context.base
+            )
             self.update_lock.release()
 
     def to_json(self) -> Optional[dict]:
         res = {
                 "table_name": self.table_name,
-                "db_name": self.context.db_name,
+                "db_name": self.context.db_name + self.context.private,
                 "key": self.context.base.to_md5(),
                 "insert_data": {}
             }
@@ -250,7 +308,7 @@ class BaseModel:
                 url=f"{self.context.base.url}/easy_get",
                 params={
                     "api": self.context.base.api,
-                    "db_name": self.context.db_name,
+                    "db_name": self.context.db_name + self.context.private,
                     "table_name": self.table_name,
                     "name": name,
                     "value": self.value[self.primary_name.upper()].value,
@@ -301,7 +359,40 @@ class BaseModel:
                 requests_thread.start()
             return StarValue(self.value[name.upper()].value_type, self.value[name.upper()].value, self.context.base)
 
+    def type_verification(self, name: str, value) -> bool:
+        p_type = self.value[name.upper()].value_type.lower()
+        if p_type == 'uuid':
+            return isinstance(value, uuid.UUID)
+        elif p_type == 'string':
+            return isinstance(value, str)
+        elif p_type == 'int':
+            return isinstance(value, int)
+        elif p_type == 'double':
+            return isinstance(value, float)
+        elif p_type == 'en_str':
+            for c in str(value):
+                if ord(c) > 126:
+                    return False
+            return isinstance(value, str)
+        elif p_type == 'context':
+            return isinstance(value, Context)
+        else:
+            return False
+
+    def update_value(self, name: str, value):
+        pass
+
     def set_value(self, name: str, value):
+        if not self.type_verification(name, value):
+            return
+
+        self.update_lock.acquire()
+        self.value[name.upper()].value = value
+        self.update_lock.release()
+
+        update_thread = threading.Thread(target=self.update_value, kwargs={name: name, value: value})
+        update_thread.start()
+
         if not self.creat_on_remote:
             creat_thread = threading.Thread(target=self.try_creat)
             creat_thread.start()
