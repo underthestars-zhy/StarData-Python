@@ -496,4 +496,3 @@ class BaseModel:
         while self.wait != 0 and wait_time <= self.context.max_destruct_time:
             time.sleep(0.1)
             wait_time += 1
-        print("Done...")
