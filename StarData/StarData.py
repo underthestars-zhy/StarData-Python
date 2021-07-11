@@ -7,6 +7,8 @@ import json
 from hashlib import md5
 import time
 import sys
+from os.path import exists, isdir, join
+from os import mkdir
 
 M = TypeVar("M")
 
@@ -18,6 +20,7 @@ class Base:
         self.salt = salt
         self.url = url
         self.version = version
+        self.local: Optional[str] = None
 
         try:
             response = requests.get(
@@ -28,11 +31,33 @@ class Base:
                 },
             )
             self.config = response.json()
-        except requests.exceptions.RequestException:
-            self.config = {}
-            # TODO: Use local config file
 
-    local: Optional[str] = None
+            save_config_thread = threading.Thread(target=self.save_local_config)
+            save_config_thread.start()
+        except requests.exceptions.RequestException:
+            self.config = self.get_config_from_local()
+
+    def creat_local(self) -> bool:
+        if self.local:
+            if not exists(self.local):
+                if isdir(self.local):
+                    mkdir(self.local)
+                    return True
+                else:
+                    return False
+            else:
+                return isdir(self.local)
+        else:
+            return False
+
+    def save_local_config(self):
+        if self.creat_local():
+            json_data = json.dumps(self.config)
+            with open(join(self.local, 'config.json'), 'w') as f:
+                f.write(json_data)
+
+    def get_config_from_local(self) -> dict:
+        pass
 
     def to_md5(self):
         md5_obj = md5()
