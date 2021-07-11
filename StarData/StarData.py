@@ -5,6 +5,7 @@ import threading
 import uuid
 import json
 from hashlib import md5
+import time
 
 M = TypeVar("M")
 
@@ -212,8 +213,10 @@ class BaseModel:
         self.update_lock = threading.Lock()
         self.creat_lock = threading.Lock()
         self.creating_lock = threading.Lock()
+        self.wait_lock = threading.Lock()
         self.creat_on_remote = False
         self.creating = False
+        self.wait = 0
 
         # Init Value dict
         for db in self.context.base.config['db']:
@@ -237,7 +240,9 @@ class BaseModel:
             self.creat_on_remote = True
 
     def try_creat(self):
+        self.add_wait()
         if self.creating or self.creat_on_remote:
+            self.reduce_wait()
             return
         self.creating_lock.acquire()
         self.creating = True
@@ -268,6 +273,8 @@ class BaseModel:
         self.creating_lock.acquire()
         self.creating = False
         self.creating_lock.release()
+
+        self.reduce_wait()
 
     def set_value_with_dict(self, data: dict):
         for p_name in self.value:
@@ -322,6 +329,7 @@ class BaseModel:
             return None
 
     def background_get_value(self, name):
+        self.add_wait()
         res = self.requests_value(name)
 
         if res is None:
@@ -333,6 +341,8 @@ class BaseModel:
             self.update_lock.acquire()
             self.value[name.upper()].value = res
             self.update_lock.release()
+
+        self.reduce_wait()
 
     def get_value(self, name: str) -> StarValue:
         if isinstance(self.value[name.upper()].value, StarEmpty):
@@ -379,8 +389,41 @@ class BaseModel:
         else:
             return False
 
+    def add_wait(self):
+        self.wait_lock.acquire()
+        self.wait += 1
+        self.wait_lock.release()
+
+    def reduce_wait(self):
+        self.wait_lock.acquire()
+        self.wait -= 1
+        self.wait_lock.release()
+
     def update_value(self, name: str, value):
-        pass
+        self.add_wait()
+
+        try:
+            requests.post(
+                url=f"{self.context.base.url}/east_set",
+                params={
+                    "api": self.context.base.api,
+                },
+                headers={
+                    "Content-Type": "application/json; charset=utf-8",
+                },
+                data=json.dumps({
+                    "table_name": self.table_name,
+                    "value": transfer_to_json_value(value),
+                    "key": self.context.base.to_md5(),
+                    "db_name": self.context.db_name + self.context.private,
+                    "primary": transfer_to_json_value(self.value[self.primary_name.upper()].value),
+                    "name": name.upper()
+                })
+            )
+        except requests.exceptions.RequestException:
+            print('HTTP Request failed')
+
+        self.reduce_wait()
 
     def set_value(self, name: str, value):
         if not self.type_verification(name, value):
@@ -390,9 +433,14 @@ class BaseModel:
         self.value[name.upper()].value = value
         self.update_lock.release()
 
-        update_thread = threading.Thread(target=self.update_value, kwargs={name: name, value: value})
-        update_thread.start()
-
         if not self.creat_on_remote:
             creat_thread = threading.Thread(target=self.try_creat)
             creat_thread.start()
+        else:
+            update_thread = threading.Thread(target=self.update_value, kwargs={'name': name, 'value': value})
+            update_thread.start()
+
+    def __del__(self):
+        while self.wait != 0:
+            time.sleep(0.1)
+        print("Done...")
