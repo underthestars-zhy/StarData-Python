@@ -1,5 +1,4 @@
 from typing import Callable, List, TypeVar, Dict, Optional
-import requests
 from .Error import *
 import threading
 import uuid
@@ -9,6 +8,7 @@ import time
 import sys
 from os.path import exists, isdir, join
 from os import mkdir
+import requests
 
 M = TypeVar("M")
 
