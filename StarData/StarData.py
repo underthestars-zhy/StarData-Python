@@ -6,6 +6,7 @@ import uuid
 import json
 from hashlib import md5
 import time
+import sys
 
 M = TypeVar("M")
 
@@ -45,7 +46,7 @@ class Base:
                     if table['table_name'].lower() == table_name.lower():
                         return table['table_parameter']
 
-    def is_private(self,  db_name: str) -> bool:
+    def is_private(self, db_name: str) -> bool:
         for db in self.config['db']:
             if db['db_name'].lower() == db_name.lower():
                 return not db['public']
@@ -60,6 +61,7 @@ class Context:
         self.get_value_mode = 0  # 0: Get back first, 1: Get first and then return, 2: Get once (Manual, loud)
         self.update_value_mode = 0  # 0: Automatic update (background) 1: Automatic update 2: Manual (save)
         self.creat_mode = 0.1  # 0: Automatic creat(.1 Background, .2: Front) 1: Manual (save .1 Background, .2: Front)
+        self.max_destruct_time = sys.maxsize
 
         try:
             response = requests.get(
@@ -289,11 +291,11 @@ class BaseModel:
 
     def to_json(self) -> Optional[dict]:
         res = {
-                "table_name": self.table_name,
-                "db_name": self.context.db_name + self.context.private,
-                "key": self.context.base.to_md5(),
-                "insert_data": {}
-            }
+            "table_name": self.table_name,
+            "db_name": self.context.db_name + self.context.private,
+            "key": self.context.base.to_md5(),
+            "insert_data": {}
+        }
 
         insert_data = {}
         for p_name in self.value:
@@ -441,6 +443,8 @@ class BaseModel:
             update_thread.start()
 
     def __del__(self):
-        while self.wait != 0:
+        wait_time = 0
+        while self.wait != 0 and wait_time <= self.context.max_destruct_time:
             time.sleep(0.1)
+            wait_time += 1
         print("Done...")
