@@ -57,7 +57,16 @@ class Base:
                 f.write(json_data)
 
     def get_config_from_local(self) -> dict:
-        pass
+        if self.creat_local():
+            read_str: str = None
+            config = {}
+            with open(join(self.local, 'config.json')) as f:
+                read_str = f.read()
+
+            if read_str and read_str != '':
+                config = json.loads(read_str)
+
+            return config
 
     def to_md5(self):
         md5_obj = md5()
