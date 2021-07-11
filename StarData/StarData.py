@@ -21,6 +21,8 @@ class Base:
         self.url = url
         self.version = version
         self.local: Optional[str] = None
+        self.wait = 0
+        self.wait_lock = threading.Lock()
 
         try:
             response = requests.get(
@@ -51,14 +53,21 @@ class Base:
             return False
 
     def save_local_config(self):
+        self.wait_lock.acquire()
+        self.wait += 1
+        self.wait_lock.release()
+
         if self.creat_local():
             json_data = json.dumps(self.config)
             with open(join(self.local, 'config.json'), 'w') as f:
                 f.write(json_data)
 
+        self.wait_lock.acquire()
+        self.wait += 1
+        self.wait_lock.release()
+
     def get_config_from_local(self) -> dict:
         if self.creat_local():
-            read_str: str = None
             config = {}
             with open(join(self.local, 'config.json')) as f:
                 read_str = f.read()
@@ -84,6 +93,12 @@ class Base:
         for db in self.config['db']:
             if db['db_name'].lower() == db_name.lower():
                 return not db['public']
+
+    def __del__(self):
+        count = 0
+        while self.wait != 0 and count <= 1000:
+            time.sleep(0.1)
+            count += 1
 
 
 class Context:
